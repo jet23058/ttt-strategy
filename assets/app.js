@@ -77,44 +77,79 @@ function updateHints() {
     .join("");
 }
 
-function generateBars(symbol, market = "tw", years = 3) {
-  const tradingDays = Math.max(180, Math.round(years * 245));
-  const seed = symbol.split("").reduce((sum, char) => sum + char.charCodeAt(0), market === "tw" ? 17 : 41);
-  let price = market === "tw" ? 24 + (seed % 90) : 80 + (seed % 260);
-  const bars = [];
-  const start = new Date();
-  start.setDate(start.getDate() - Math.round(tradingDays * 1.55));
-  let calendarOffset = 0;
-
-  while (bars.length < tradingDays) {
-    const date = new Date(start);
-    date.setDate(start.getDate() + calendarOffset);
-    calendarOffset += 1;
-    if (date.getDay() === 0 || date.getDay() === 6) continue;
-
-    const i = bars.length;
-    const longTrend = i > tradingDays * 0.28 ? 0.0014 + (seed % 5) * 0.00015 : -0.00015;
-    const wave = Math.sin((i + seed) / 11) * 0.011 + Math.cos((i + seed) / 29) * 0.007;
-    const event = [0.38, 0.52, 0.71].some((x) => Math.abs(i - tradingDays * x) < 1) ? 0.06 + (seed % 3) * 0.012 : 0;
-    const finalBreakout = i === tradingDays - 1 && seed % 2 === 0 ? 0.082 : 0;
-    const shake = [0.58, 0.82].some((x) => Math.abs(i - tradingDays * x) < 1) ? -0.052 : 0;
-    const daily = longTrend + wave + event + finalBreakout + shake;
-    const open = price * (1 + Math.sin(i / 5 + seed) * 0.006);
-    price = Math.max(5, price * (1 + daily));
-    const high = Math.max(open, price) * (1 + 0.009 + Math.abs(Math.sin(i + seed)) * 0.018);
-    const low = Math.min(open, price) * (1 - 0.009 - Math.abs(Math.cos(i + seed)) * 0.014);
-    const baseVolume = market === "tw" ? 1_800_000 + (seed % 13) * 520_000 : 7_000_000 + (seed % 11) * 900_000;
-    const volume = baseVolume * (1 + Math.max(0, daily) * 13 + Math.abs(Math.sin(i / 8)) * 1.1);
-    bars.push({
-      date: date.toISOString().slice(0, 10),
-      open,
-      high,
-      low,
-      close: price,
-      volume,
-    });
+function yahooCandidates(symbolInfo) {
+  const raw = symbolInfo.symbol.toUpperCase().replace(/\.(TW|TWO)$/i, "");
+  if (symbolInfo.market === "tw") {
+    return [`${raw}.TW`, `${raw}.TWO`];
   }
-  return bars;
+  return [raw];
+}
+
+function rangeForYears(years) {
+  if (years <= 1) return "1y";
+  if (years <= 2) return "2y";
+  if (years <= 5) return "5y";
+  if (years <= 10) return "10y";
+  return "max";
+}
+
+async function fetchHistoricalBars(symbolInfo, years) {
+  const params = new URLSearchParams({
+    symbol: symbolInfo.symbol,
+    market: symbolInfo.market,
+    years: String(years),
+  });
+
+  try {
+    const response = await fetch(`/api/history?${params.toString()}`);
+    if (response.ok) {
+      const payload = await response.json();
+      if (payload.bars?.length) {
+        symbolInfo.yahooSymbol = payload.yahooSymbol;
+        symbolInfo.name = symbolInfo.name === symbolInfo.symbol && payload.name ? payload.name : symbolInfo.name;
+        return payload.bars;
+      }
+      throw new Error(payload.error || "API 沒有回傳可用日 K");
+    }
+  } catch (error) {
+    console.warn("Local API unavailable, trying direct Yahoo fetch.", error);
+  }
+
+  let lastError = "";
+  for (const yahooSymbol of yahooCandidates(symbolInfo)) {
+    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(yahooSymbol)}?range=${rangeForYears(Number(years))}&interval=1d&events=history`;
+    try {
+      const response = await fetch(url);
+      if (!response.ok) {
+        lastError = `${yahooSymbol}: HTTP ${response.status}`;
+        continue;
+      }
+      const payload = await response.json();
+      const bars = parseYahooChart(payload, yahooSymbol);
+      if (bars.length) {
+        symbolInfo.yahooSymbol = yahooSymbol;
+        return bars;
+      }
+      lastError = `${yahooSymbol}: 沒有日 K`;
+    } catch (error) {
+      lastError = `${yahooSymbol}: ${error.message}`;
+    }
+  }
+  throw new Error(`抓不到 ${symbolInfo.symbol} 的 Yahoo Finance OHLCV。${lastError}`);
+}
+
+function parseYahooChart(payload, yahooSymbol) {
+  const result = payload?.chart?.result?.[0];
+  const timestamps = result?.timestamp || [];
+  const quote = result?.indicators?.quote?.[0] || {};
+  return timestamps.map((timestamp, index) => ({
+    date: new Date(timestamp * 1000).toISOString().slice(0, 10),
+    open: Number(quote.open?.[index]),
+    high: Number(quote.high?.[index]),
+    low: Number(quote.low?.[index]),
+    close: Number(quote.close?.[index]),
+    volume: Number(quote.volume?.[index]),
+  })).filter((bar) => [bar.open, bar.high, bar.low, bar.close, bar.volume].every(Number.isFinite));
 }
 
 function sma(values, period, index) {
@@ -270,12 +305,15 @@ function tttSignal(bars, index, position, market, threshold) {
   return null;
 }
 
-function runBacktest(symbolInfo, options = {}) {
+function runBacktest(symbolInfo, rawBars, options = {}) {
   const years = Number(options.years ?? $("#yearsInput").value);
   const capital = Number(options.capital ?? $("#capitalInput").value);
   const maxPositionPct = Number(options.maxPositionPct ?? $("#maxPositionInput").value / 100);
   const threshold = Number(options.volumeThreshold ?? $("#volumeThresholdInput").value);
-  const bars = enrich(generateBars(symbolInfo.symbol, symbolInfo.market, years));
+  const bars = enrich(rawBars);
+  if (bars.length < 75) {
+    throw new Error(`${symbolInfo.symbol} 只有 ${bars.length} 筆日 K，TTT 至少需要 75 筆。`);
+  }
   let cash = capital;
   let position = { shares: 0, entryPrice: null, entryDate: null, stage: 0, entryReason: "", reducedMa20: false, reducedTrend: false, reducedBigWin: false };
   const trades = [];
@@ -473,18 +511,42 @@ function renderChart(result) {
   `;
 }
 
-function runQuery() {
+function renderError(message) {
+  $("#metricGrid").innerHTML = `<article class="metric bad"><span>資料錯誤</span><strong>抓取失敗</strong></article>`;
+  $("#entryStatus").innerHTML = statusPill("暫不進場");
+  $("#entryReason").textContent = message;
+  $("#addStatus").innerHTML = statusPill("不適合加碼");
+  $("#addReason").textContent = "沒有可用的真實 OHLCV 資料。";
+  $("#structureStatus").innerHTML = statusPill("資料不足");
+  $("#conclusionText").textContent = message;
+  $("#priceChart").innerHTML = "";
+  $("#tradeTable").innerHTML = `<tr><td colspan="7">${message}</td></tr>`;
+}
+
+async function runQuery() {
   const symbolInfo = resolveStock($("#symbolInput").value, state.market);
-  const result = runBacktest(symbolInfo);
-  renderQueryResult(result);
-  addQueryHistory(symbolInfo);
+  $("#runQueryButton").disabled = true;
+  $("#runQueryButton").textContent = "抓取資料中";
+  $("#resultTitle").textContent = `${symbolInfo.symbol} ${symbolInfo.name}`;
+  $("#stableDate").textContent = "讀取 Yahoo Finance OHLCV...";
+  try {
+    const rawBars = await fetchHistoricalBars(symbolInfo, Number($("#yearsInput").value));
+    const result = runBacktest(symbolInfo, rawBars);
+    renderQueryResult(result);
+    addQueryHistory(symbolInfo);
+  } catch (error) {
+    renderError(error.message);
+  } finally {
+    $("#runQueryButton").disabled = false;
+    $("#runQueryButton").textContent = "執行 TTT 回測";
+  }
 }
 
 function scanCacheKey() {
-  return [todayKey(), "TTT v2.0", $("#scanLimitInput").value, $("#yearsInput").value, $("#scanVolumeThreshold").value, $("#scanSymbols").value.trim()].join("|");
+  return [todayKey(), "TTT v2.0 yahoo-real", $("#scanLimitInput").value, $("#yearsInput").value, $("#scanVolumeThreshold").value, $("#scanSymbols").value.trim()].join("|");
 }
 
-function buildScannerRows(useCache = true) {
+async function buildScannerRows(useCache = true) {
   const cache = readStore(STORAGE.scanCache, {});
   const key = scanCacheKey();
   if (useCache && cache[key]) {
@@ -494,29 +556,57 @@ function buildScannerRows(useCache = true) {
   }
   const symbols = $("#scanSymbols").value.split(/\s+/).filter(Boolean).slice(0, Number($("#scanLimitInput").value));
   const threshold = Number($("#scanVolumeThreshold").value);
-  state.scanRows = symbols.map((input, index) => {
+  state.scanRows = [];
+  $("#scannerTable").innerHTML = `<tr><td colspan="16">正在抓取 Yahoo Finance 真實日 K：0 / ${symbols.length}</td></tr>`;
+
+  for (const [index, input] of symbols.entries()) {
     const info = resolveStock(input, "tw");
-    const result = runBacktest(info, { years: Number($("#yearsInput").value), volumeThreshold: threshold });
-    const d = result.decision;
-    return {
-      originalRank: index + 1,
-      symbol: info.symbol,
-      name: info.name,
-      entryReady: d.entryReady,
-      addStatus: d.addStatus,
-      date: d.metrics.date,
-      close: d.metrics.close,
-      ma5: d.metrics.ma5,
-      ma20: d.metrics.ma20,
-      ma60: d.metrics.ma60,
-      volumeRatio20: d.metrics.volumeRatio20 || 0,
-      volumeRatio5: d.metrics.volumeRatio5 || 0,
-      structure: d.structure,
-      turnover: d.metrics.turnover,
-      ma20Distance: d.metrics.ma20Distance || 0,
-      reason: d.entryReady ? d.entryReasons[0] : d.entryReasons.slice(0, 2).join("、"),
-    };
-  });
+    try {
+      const rawBars = await fetchHistoricalBars(info, Number($("#yearsInput").value));
+      const result = runBacktest(info, rawBars, { years: Number($("#yearsInput").value), volumeThreshold: threshold });
+      const d = result.decision;
+      state.scanRows.push({
+        originalRank: index + 1,
+        symbol: info.symbol,
+        yahooSymbol: info.yahooSymbol || `${info.symbol}.TW`,
+        name: info.name,
+        entryReady: d.entryReady,
+        addStatus: d.addStatus,
+        date: d.metrics.date,
+        close: d.metrics.close,
+        ma5: d.metrics.ma5,
+        ma20: d.metrics.ma20,
+        ma60: d.metrics.ma60,
+        volumeRatio20: d.metrics.volumeRatio20 || 0,
+        volumeRatio5: d.metrics.volumeRatio5 || 0,
+        structure: d.structure,
+        turnover: d.metrics.turnover,
+        ma20Distance: d.metrics.ma20Distance || 0,
+        reason: d.entryReady ? d.entryReasons[0] : d.entryReasons.slice(0, 2).join("、"),
+      });
+    } catch (error) {
+      state.scanRows.push({
+        originalRank: index + 1,
+        symbol: info.symbol,
+        yahooSymbol: `${info.symbol}.TW`,
+        name: info.name,
+        entryReady: false,
+        addStatus: "不適合加碼",
+        date: "-",
+        close: null,
+        ma5: null,
+        ma20: null,
+        ma60: null,
+        volumeRatio20: 0,
+        volumeRatio5: 0,
+        structure: "資料錯誤",
+        turnover: 0,
+        ma20Distance: 0,
+        reason: error.message,
+      });
+    }
+    $("#scanCacheStatus").textContent = `抓取真實資料：${index + 1} / ${symbols.length}`;
+  }
   cache[key] = state.scanRows;
   writeStore(STORAGE.scanCache, cache);
   $("#scanCacheStatus").textContent = `已建立今日快取：${state.scanRows.length} 檔`;
@@ -549,7 +639,7 @@ function renderScanner() {
   $("#scannerTable").innerHTML = rows.length ? rows.map((row, index) => `
     <tr data-symbol="${row.symbol}">
       <td>${index + 1}</td>
-      <td>${row.symbol}.TW</td>
+      <td>${row.yahooSymbol || `${row.symbol}.TW`}</td>
       <td>${row.name}</td>
       <td>${statusPill(row.entryReady ? "適合進場" : "暫不進場")}</td>
       <td>${statusPill(row.addStatus)}</td>
@@ -568,10 +658,14 @@ function renderScanner() {
   `).join("") : `<tr><td colspan="16">沒有符合條件的股票。</td></tr>`;
 }
 
-function runScan(useCache = true) {
-  buildScannerRows(useCache);
+async function runScan(useCache = true) {
+  $("#runScanButton").disabled = true;
+  $("#runScanButton").textContent = "掃描中";
+  await buildScannerRows(useCache);
   state.scanSort = { key: null, dir: 0 };
   renderScanner();
+  $("#runScanButton").disabled = false;
+  $("#runScanButton").textContent = "開始掃描";
 }
 
 function renderImagePreviews(files) {
@@ -587,35 +681,45 @@ function extractSymbolsFromText(text) {
   return [...new Set((text.match(/[A-Z]{1,5}|\d{4}/g) || []).map((s) => s.trim()))];
 }
 
-function runImageAnalysis() {
+async function runImageAnalysis() {
   const symbols = extractSymbolsFromText($("#imageSymbols").value);
-  const rows = symbols.map((symbol) => {
+  $("#runImageAnalysisButton").disabled = true;
+  $("#runImageAnalysisButton").textContent = "分析中";
+  const rows = [];
+  for (const symbol of symbols) {
     const market = /^\d{4}$/.test(symbol) ? "tw" : "us";
     const info = resolveStock(symbol, market);
-    const result = runBacktest(info, { market });
-    const d = result.decision;
-    return { info, result, d };
-  });
-  $("#imageResultTable").innerHTML = rows.length ? rows.map(({ info, result, d }) => `
+    try {
+      const rawBars = await fetchHistoricalBars(info, Number($("#yearsInput").value));
+      const result = runBacktest(info, rawBars, { market });
+      const d = result.decision;
+      rows.push({ info, result, d, error: null });
+    } catch (error) {
+      rows.push({ info, result: null, d: null, error: error.message });
+    }
+  }
+  $("#imageResultTable").innerHTML = rows.length ? rows.map(({ info, result, d, error }) => `
     <tr>
       <td>${info.symbol}</td>
       <td>${info.name}</td>
-      <td>${statusPill(d.entryReady ? "適合進場" : "暫不進場")}</td>
-      <td>${statusPill(d.addStatus)}</td>
-      <td>${result.isOpen ? "持有中" : "空手"}</td>
-      <td>${fmtPct(result.returnPct)}</td>
-      <td>${fmtPct(result.buyHoldPct)}</td>
-      <td>${fmtPct(result.drawdown)}</td>
-      <td>${result.trades.length}</td>
-      <td>${d.metrics.date}</td>
-      <td>${fmtNum(d.metrics.close)}</td>
-      <td>${d.entryReady ? d.entryReasons[0] : d.entryReasons.slice(0, 2).join("、")}</td>
+      <td>${d ? statusPill(d.entryReady ? "適合進場" : "暫不進場") : statusPill("資料錯誤")}</td>
+      <td>${d ? statusPill(d.addStatus) : "-"}</td>
+      <td>${result ? (result.isOpen ? "持有中" : "空手") : "-"}</td>
+      <td>${result ? fmtPct(result.returnPct) : "-"}</td>
+      <td>${result ? fmtPct(result.buyHoldPct) : "-"}</td>
+      <td>${result ? fmtPct(result.drawdown) : "-"}</td>
+      <td>${result ? result.trades.length : "-"}</td>
+      <td>${d ? d.metrics.date : "-"}</td>
+      <td>${d ? fmtNum(d.metrics.close) : "-"}</td>
+      <td>${d ? (d.entryReady ? d.entryReasons[0] : d.entryReasons.slice(0, 2).join("、")) : error || "資料抓取失敗"}</td>
     </tr>
   `).join("") : `<tr><td colspan="12">尚未提供可分析的股號。</td></tr>`;
   const history = readStore(STORAGE.imageSymbols, []);
   const merged = [...new Set([...symbols, ...history])].slice(0, 80);
   writeStore(STORAGE.imageSymbols, merged);
   renderImageHistory();
+  $("#runImageAnalysisButton").disabled = false;
+  $("#runImageAnalysisButton").textContent = "分析股票";
 }
 
 function saveImageGroup() {
