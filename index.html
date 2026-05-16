@@ -1,0 +1,322 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TTT 低頻趨勢 Web</title>
+  <link rel="stylesheet" href="assets/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <p class="kicker">Taiwan Trend Tracking Strategy</p>
+      <h1>TTT 低頻趨勢</h1>
+      <p class="identity">Strategy Version: TTT v2.0 | Engine: Position-Based | Exit Mode: Close Confirm | Position: Core/Mobile</p>
+    </div>
+    <nav class="top-tabs" aria-label="TTT 功能">
+      <button class="top-tab active" data-view="query">股號查詢</button>
+      <button class="top-tab" data-view="scanner">掃描適合進場股票</button>
+      <button class="top-tab" data-view="image">依據上傳圖片分析股票</button>
+      <button class="top-tab" data-view="history">歷史與快取</button>
+    </nav>
+  </header>
+
+  <main>
+    <section id="query" class="view active">
+      <div class="shell two-col">
+        <aside class="panel controls">
+          <div class="segmented" role="tablist" aria-label="市場">
+            <button class="segment active" data-market="tw">台股查詢</button>
+            <button class="segment" data-market="us">美股查詢</button>
+          </div>
+
+          <label>
+            股號或股名
+            <input id="symbolInput" list="symbolHints" value="6217" autocomplete="off">
+            <datalist id="symbolHints"></datalist>
+          </label>
+
+          <div class="inline-fields">
+            <label>
+              回測年數
+              <input id="yearsInput" type="number" value="3" min="1" max="10" step="1">
+            </label>
+            <label>
+              20日最低量比
+              <input id="volumeThresholdInput" type="number" value="1.2" min="0" step="0.1">
+            </label>
+          </div>
+
+          <div class="inline-fields">
+            <label>
+              起始資金
+              <input id="capitalInput" type="number" value="100000" min="10000" step="10000">
+            </label>
+            <label>
+              單檔上限 %
+              <input id="maxPositionInput" type="number" value="20" min="5" max="100" step="5">
+            </label>
+          </div>
+
+          <div class="button-row">
+            <button id="refreshNamesButton" class="ghost">更新提示</button>
+            <button id="runQueryButton" class="primary">執行 TTT 回測</button>
+          </div>
+
+          <section class="subpanel">
+            <div class="subpanel-head">
+              <h2>查詢歷史</h2>
+              <button id="clearHistoryButton" class="icon-button" title="清除歷史">清</button>
+            </div>
+            <div id="queryHistory" class="history-list"></div>
+          </section>
+        </aside>
+
+        <section class="panel results">
+          <div class="result-head">
+            <div>
+              <p id="resultMarket" class="kicker">台股查詢</p>
+              <h2 id="resultTitle">6217 中探針</h2>
+            </div>
+            <div id="stableDate" class="date-chip"></div>
+          </div>
+
+          <div id="metricGrid" class="metric-grid"></div>
+
+          <div class="highlight-grid">
+            <article class="highlight" id="entryCard">
+              <div class="card-title">
+                <h3>是否適合進場</h3>
+                <button class="help-button" data-help="entry" title="完整理由">?</button>
+              </div>
+              <strong id="entryStatus"></strong>
+              <p id="entryReason"></p>
+            </article>
+            <article class="highlight" id="addCard">
+              <div class="card-title">
+                <h3>加碼時機</h3>
+                <button class="help-button" data-help="add" title="完整理由">?</button>
+              </div>
+              <strong id="addStatus"></strong>
+              <p id="addReason"></p>
+            </article>
+            <article class="highlight">
+              <div class="card-title">
+                <h3>TTT 策略結論</h3>
+                <button class="help-button" data-help="conclusion" title="完整理由">?</button>
+              </div>
+              <strong id="structureStatus"></strong>
+              <p id="conclusionText"></p>
+            </article>
+          </div>
+
+          <div class="chart-toolbar">
+            <span>波段圖表</span>
+            <button id="resetZoomButton" class="ghost">重置縮放</button>
+          </div>
+          <div class="chart-shell">
+            <svg id="priceChart" role="img" aria-label="TTT 波段圖"></svg>
+            <div id="chartTooltip" class="chart-tooltip"></div>
+          </div>
+
+          <div class="table-section">
+            <h3>交易紀錄</h3>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>進場日</th>
+                    <th>出場日</th>
+                    <th>進場價</th>
+                    <th>出場價</th>
+                    <th>報酬</th>
+                    <th>進場原因</th>
+                    <th>出場原因</th>
+                  </tr>
+                </thead>
+                <tbody id="tradeTable"></tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+      </div>
+    </section>
+
+    <section id="scanner" class="view">
+      <div class="shell two-col">
+        <aside class="panel controls">
+          <label>
+            掃描前 N 大
+            <input id="scanLimitInput" type="number" value="1000" min="100" max="1000" step="100">
+          </label>
+          <label>
+            加碼狀態
+            <select id="scanAddFilter">
+              <option value="all">全部</option>
+              <option value="可加碼觀察">可加碼觀察</option>
+              <option value="等待加碼">等待加碼</option>
+              <option value="不適合加碼">不適合加碼</option>
+            </select>
+          </label>
+          <label>
+            20日最低量比
+            <input id="scanVolumeThreshold" type="number" value="1.2" min="0" step="0.1">
+          </label>
+          <label>
+            掃描清單
+            <textarea id="scanSymbols" spellcheck="false">2330
+2317
+6217
+2337
+3016
+6442
+8210
+2368
+2103
+6147
+3289
+4966</textarea>
+          </label>
+          <button id="runScanButton" class="primary wide">開始掃描</button>
+          <p id="scanCacheStatus" class="status-line"></p>
+        </aside>
+
+        <section class="panel results">
+          <div class="result-head">
+            <div>
+              <p class="kicker">Stable Close Scanner</p>
+              <h2>掃描適合進場股票</h2>
+            </div>
+            <button id="clearScanCacheButton" class="ghost">清除掃描快取</button>
+          </div>
+          <div class="table-wrap tall">
+            <table>
+              <thead>
+                <tr>
+                  <th>排名</th>
+                  <th>股號</th>
+                  <th>股名</th>
+                  <th>進場狀態</th>
+                  <th>加碼狀態</th>
+                  <th data-sort="date">收盤日</th>
+                  <th data-sort="close">收盤</th>
+                  <th data-sort="ma5">5MA</th>
+                  <th data-sort="ma20">20MA</th>
+                  <th data-sort="ma60">60MA</th>
+                  <th data-sort="volumeRatio20">20日量比</th>
+                  <th data-sort="volumeRatio5">5日量比</th>
+                  <th data-sort="structure">價量</th>
+                  <th data-sort="turnover">成交金額</th>
+                  <th data-sort="ma20Distance">20MA 乖離</th>
+                  <th>原因</th>
+                </tr>
+              </thead>
+              <tbody id="scannerTable"></tbody>
+            </table>
+          </div>
+        </section>
+      </div>
+    </section>
+
+    <section id="image" class="view">
+      <div class="shell two-col">
+        <aside class="panel controls">
+          <label>
+            LLM 提供者
+            <select id="llmProvider">
+              <option>Google Gemini</option>
+              <option>OpenAI compatible</option>
+              <option>Manual symbols only</option>
+            </select>
+          </label>
+          <label>
+            API Key
+            <input id="apiKeyInput" type="password" placeholder="本靜態版不會送出金鑰">
+          </label>
+          <label>
+            Model
+            <input id="modelInput" value="gemma-4-31b-it">
+          </label>
+          <label>
+            上傳圖片
+            <input id="imageInput" type="file" accept="image/*" multiple>
+          </label>
+          <label>
+            圖片中辨識出的股號
+            <textarea id="imageSymbols" spellcheck="false" placeholder="可貼上 LLM 辨識後的股號，例如：2330 6217 3016"></textarea>
+          </label>
+          <div class="button-row">
+            <button id="mockExtractButton" class="ghost">從檔名抓股號</button>
+            <button id="runImageAnalysisButton" class="primary">分析股票</button>
+          </div>
+        </aside>
+
+        <section class="panel results">
+          <div class="result-head">
+            <div>
+              <p class="kicker">Image Group Analysis</p>
+              <h2>圖片分析結果</h2>
+            </div>
+            <button id="saveImageGroupButton" class="ghost">儲存圖片組</button>
+          </div>
+          <div id="imagePreviewGrid" class="preview-grid"></div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>股號</th>
+                  <th>股名</th>
+                  <th>進場結論</th>
+                  <th>加碼狀態</th>
+                  <th>是否持有</th>
+                  <th>策略報酬</th>
+                  <th>買進持有</th>
+                  <th>最大回撤</th>
+                  <th>交易數</th>
+                  <th>收盤日</th>
+                  <th>收盤價</th>
+                  <th>原因</th>
+                </tr>
+              </thead>
+              <tbody id="imageResultTable"></tbody>
+            </table>
+          </div>
+        </section>
+      </div>
+    </section>
+
+    <section id="history" class="view">
+      <div class="shell history-grid">
+        <section class="panel">
+          <div class="subpanel-head">
+            <h2>圖片組紀錄</h2>
+            <button id="clearImageGroupsButton" class="ghost">清除</button>
+          </div>
+          <div id="imageGroupHistory" class="history-list large"></div>
+        </section>
+        <section class="panel">
+          <div class="subpanel-head">
+            <h2>圖片股號紀錄</h2>
+            <button id="clearImageSymbolsButton" class="ghost">清除</button>
+          </div>
+          <div id="imageSymbolHistory" class="history-list large"></div>
+        </section>
+        <section class="panel field-guide">
+          <h2>常見欄位與名詞</h2>
+          <div id="fieldGuide"></div>
+        </section>
+      </div>
+    </section>
+  </main>
+
+  <dialog id="helpDialog">
+    <form method="dialog">
+      <button class="dialog-close" aria-label="關閉">×</button>
+    </form>
+    <h2 id="helpTitle"></h2>
+    <p id="helpBody"></p>
+  </dialog>
+
+  <script src="assets/app.js"></script>
+</body>
+</html>
