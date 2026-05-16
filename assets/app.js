@@ -43,6 +43,8 @@ let state = {
   scanRows: [],
   scanSort: { key: null, dir: 0 },
   zoom: null,
+  chart: null,
+  drag: null,
 };
 
 const fmtPct = (value) => Number.isFinite(value) ? `${(value * 100).toFixed(1)}%` : "-";
@@ -480,7 +482,9 @@ function renderChart(result) {
   const width = svg.clientWidth || 960;
   const height = 390;
   const pad = { top: 22, right: 22, bottom: 34, left: 56 };
-  const bars = result.bars.slice(state.zoom?.start ?? 0, state.zoom?.end ?? result.bars.length);
+  const startIndex = state.zoom?.start ?? 0;
+  const endIndex = state.zoom?.end ?? result.bars.length;
+  const bars = result.bars.slice(startIndex, endIndex);
   const values = bars.flatMap((bar) => [bar.close, bar.ma20].filter(Number.isFinite));
   const min = Math.min(...values) * 0.96;
   const max = Math.max(...values) * 1.04;
@@ -494,6 +498,7 @@ function renderChart(result) {
     const color = action.action === "買進" || action.action === "加碼" ? "#15803d" : "#b91c1c";
     return `<circle cx="${x(index)}" cy="${y(action.price)}" r="5" fill="${color}"><title>${action.date} ${action.action} ${fmtNum(action.price)} ${action.reason}</title></circle>`;
   }).join("");
+  state.chart = { width, height, pad, bars, startIndex, endIndex, x, y };
   svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
   svg.innerHTML = `
     <rect width="${width}" height="${height}" fill="#fbfcfb"></rect>
@@ -506,9 +511,130 @@ function renderChart(result) {
     <polyline points="${line("close")}" fill="none" stroke="#1d4ed8" stroke-width="2.4"></polyline>
     <polyline points="${line("ma20")}" fill="none" stroke="#b45309" stroke-width="1.8" stroke-dasharray="5 5"></polyline>
     ${markers}
+    <g id="chartCursor" style="display:none">
+      <line id="cursorLine" y1="${pad.top}" y2="${height - pad.bottom}" stroke="#475569" stroke-width="1" stroke-dasharray="4 4"></line>
+      <circle id="cursorDot" r="4" fill="#1d4ed8"></circle>
+    </g>
+    <rect id="zoomBox" x="0" y="${pad.top}" width="0" height="${height - pad.top - pad.bottom}" fill="rgba(29,78,216,0.12)" stroke="#1d4ed8" stroke-width="1.5" style="display:none"></rect>
     <text x="${pad.left}" y="${height - 10}" fill="#64748b" font-size="12">${bars[0]?.date || ""}</text>
     <text x="${width - 104}" y="${height - 10}" fill="#64748b" font-size="12">${bars[bars.length - 1]?.date || ""}</text>
   `;
+}
+
+function chartPointFromEvent(event) {
+  const svg = $("#priceChart");
+  const rect = svg.getBoundingClientRect();
+  const chart = state.chart;
+  if (!chart) return null;
+  const x = ((event.clientX - rect.left) / rect.width) * chart.width;
+  const y = ((event.clientY - rect.top) / rect.height) * chart.height;
+  return { x, y };
+}
+
+function chartIndexFromX(xValue) {
+  const chart = state.chart;
+  const innerWidth = chart.width - chart.pad.left - chart.pad.right;
+  const ratio = Math.max(0, Math.min(1, (xValue - chart.pad.left) / innerWidth));
+  return Math.round(ratio * Math.max(1, chart.bars.length - 1));
+}
+
+function showChartTooltip(event) {
+  const chart = state.chart;
+  if (!chart || !chart.bars.length) return;
+  const point = chartPointFromEvent(event);
+  if (!point) return;
+  if (point.x < chart.pad.left || point.x > chart.width - chart.pad.right || point.y < chart.pad.top || point.y > chart.height - chart.pad.bottom) {
+    hideChartTooltip();
+    return;
+  }
+  const index = chartIndexFromX(point.x);
+  const bar = chart.bars[index];
+  const svgX = chart.x(index);
+  const svgY = chart.y(bar.close);
+  const action = state.lastResult?.actions.find((item) => item.date === bar.date);
+  const cursor = $("#chartCursor");
+  const cursorLine = $("#cursorLine");
+  const cursorDot = $("#cursorDot");
+  if (cursor && cursorLine && cursorDot) {
+    cursor.style.display = "block";
+    cursorLine.setAttribute("x1", svgX);
+    cursorLine.setAttribute("x2", svgX);
+    cursorDot.setAttribute("cx", svgX);
+    cursorDot.setAttribute("cy", svgY);
+  }
+
+  const tooltip = $("#chartTooltip");
+  tooltip.style.display = "block";
+  tooltip.innerHTML = `
+    <strong>${bar.date}</strong>
+    <span>收盤 ${fmtNum(bar.close)}</span>
+    <span>20MA ${fmtNum(bar.ma20)}</span>
+    <span>成交量 ${fmtMoney(bar.volume)}</span>
+    ${action ? `<span>${action.action} ${fmtNum(action.price)}</span>` : ""}
+  `;
+  const shell = tooltip.parentElement.getBoundingClientRect();
+  const left = Math.min(shell.width - 176, Math.max(8, event.clientX - shell.left + 14));
+  const top = Math.min(shell.height - 112, Math.max(8, event.clientY - shell.top + 14));
+  tooltip.style.left = `${left}px`;
+  tooltip.style.top = `${top}px`;
+}
+
+function hideChartTooltip() {
+  $("#chartTooltip").style.display = "none";
+  const cursor = $("#chartCursor");
+  if (cursor) cursor.style.display = "none";
+}
+
+function startChartDrag(event) {
+  const chart = state.chart;
+  const point = chartPointFromEvent(event);
+  if (!chart || !point || point.x < chart.pad.left || point.x > chart.width - chart.pad.right) return;
+  state.drag = { startX: point.x, currentX: point.x };
+  const box = $("#zoomBox");
+  if (box) {
+    box.style.display = "block";
+    box.setAttribute("x", point.x);
+    box.setAttribute("width", 0);
+  }
+}
+
+function updateChartDrag(event) {
+  if (!state.drag) {
+    showChartTooltip(event);
+    return;
+  }
+  const chart = state.chart;
+  const point = chartPointFromEvent(event);
+  if (!chart || !point) return;
+  const boundedX = Math.max(chart.pad.left, Math.min(chart.width - chart.pad.right, point.x));
+  state.drag.currentX = boundedX;
+  const x = Math.min(state.drag.startX, boundedX);
+  const width = Math.abs(boundedX - state.drag.startX);
+  const box = $("#zoomBox");
+  if (box) {
+    box.style.display = "block";
+    box.setAttribute("x", x);
+    box.setAttribute("width", width);
+  }
+}
+
+function finishChartDrag() {
+  if (!state.drag || !state.chart) return;
+  const chart = state.chart;
+  const start = chartIndexFromX(state.drag.startX);
+  const end = chartIndexFromX(state.drag.currentX);
+  const left = Math.min(start, end);
+  const right = Math.max(start, end);
+  const box = $("#zoomBox");
+  if (box) box.style.display = "none";
+  state.drag = null;
+  if (right - left >= 8) {
+    state.zoom = {
+      start: chart.startIndex + left,
+      end: chart.startIndex + right + 1,
+    };
+    renderChart(state.lastResult);
+  }
 }
 
 function renderError(message) {
@@ -869,6 +995,17 @@ function wireEvents() {
   $$(".help-button").forEach((button) => button.addEventListener("click", () => showHelp(button.dataset.help)));
   $("#resetZoomButton").addEventListener("click", () => {
     state.zoom = null;
+    if (state.lastResult) renderChart(state.lastResult);
+  });
+  $("#priceChart").addEventListener("mousemove", updateChartDrag);
+  $("#priceChart").addEventListener("mouseleave", () => {
+    if (!state.drag) hideChartTooltip();
+  });
+  $("#priceChart").addEventListener("mousedown", startChartDrag);
+  window.addEventListener("mouseup", finishChartDrag);
+  $("#priceChart").addEventListener("dblclick", () => {
+    state.zoom = null;
+    state.drag = null;
     if (state.lastResult) renderChart(state.lastResult);
   });
 }
